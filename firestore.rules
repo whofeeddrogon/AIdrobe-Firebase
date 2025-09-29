@@ -1,0 +1,13 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Sunucu tarafı (Firebase Admin SDK) erişimi her zaman izinlidir
+    // ve bu kuralları atlar. Bu kurallar yalnızca istemci (mobil/web)
+    // tarafı erişimini kısıtlamak içindir.
+    // Varsayılan olarak tüm istemci erişimini reddediyoruz.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
