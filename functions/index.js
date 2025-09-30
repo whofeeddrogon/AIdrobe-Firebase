@@ -175,19 +175,24 @@ exports.analyzeClothingImage = functions
             throw new functions.https.HttpsError("internal", "Yapay zekanın cevabı anlaşılamadı. Lütfen tekrar deneyin.");
         }
       } catch (error) {
+        // Quota hatalarını doğrudan geçir
+        if (error.code === "resource-exhausted") {
+            throw error;
+        }
         console.error("Fal API hatası (analyzeClothingImage):", error);
         throw new functions.https.HttpsError("internal", "Kıyafet analizi sırasında bir hata oluştu.");
       }
     });
 
 
-// --- 2. KULLANICI FONKSİYONU: SANAL DENEME ---
+// --- 2. KULLANICI FONKSİYONU: SANAL DENEME (GÜNCELLENDİ) ---
 /**
  * Bir kıyafeti bir poz üzerinde dener.
  * Kullanıcının 'remainingTryOns' kotasını kontrol eder ve düşürür.
  */
 exports.virtualTryOn = functions
     .https.onCall({secrets: [falKey]}, async (payload, context) => {
+      
       const data = payload.data || payload;
       const { adapty_user_id, pose_image_base_64, clothing_image_base_64 } = data;
 
@@ -196,12 +201,16 @@ exports.virtualTryOn = functions
       }
 
       try {
+        console.log(`Virtual try-on başlatılıyor - User: ${adapty_user_id}`);
+        
         // Kullanıcının deneme hakkı olup olmadığını kontrol et ve kotayı düşür
         await checkOrUpdateQuota(adapty_user_id, "remainingTryOns");
 
         // Secret'tan API key'i al
         const apiKey = falKey.value();
 
+        console.log("FAL AI Virtual Try-On API'sine istek gönderiliyor...");
+        
         const response = await axios.post(
             "https://fal.run/fal-ai/image-apps-v2/virtual-try-on",
             {
@@ -217,33 +226,51 @@ exports.virtualTryOn = functions
             },
         );
 
+        console.log("FAL AI Virtual Try-On response alındı:", response.status);
+
         // FAL AI'dan gelen response'u işle
         const resultImageUrl = response.data?.images?.[0]?.url;
 
         if (!resultImageUrl) {
-            console.error("API'den geçerli bir görüntü URL'si alınamadı. Response:", response.data);
-            throw new functions.https.HttpsError("internal", "API'den geçerli bir görüntü URL'si alınamadı.");
+            console.error("API'den geçerli bir görüntü URL'si alınamadı. Full Response:", JSON.stringify(response.data, null, 2));
+            throw new functions.https.HttpsError("internal", "Sanal deneme sonucu oluşturulamadı. Lütfen tekrar deneyin.");
         }
 
+        console.log(`Virtual try-on başarıyla tamamlandı - User: ${adapty_user_id}`);
         return { result_image_url: resultImageUrl };
 
     } catch (error) {
-        // Hata'nın 'resource-exhausted' olup olmadığını kontrol et
+        // Quota hatalarını doğrudan geçir
         if (error.code === "resource-exhausted") {
-            throw error; // Kotanın bittiğine dair hatayı doğrudan geri gönder
+            console.log(`Quota exhausted for user ${adapty_user_id} - Virtual Try-On`);
+            throw error;
         }
-        console.error("FAL AI Virtual Try-On hatası:", error.response ? error.response.data : error.message);
-        throw new functions.https.HttpsError("internal", "Sanal deneme sırasında bir hata oluştu.");
+        
+        // Axios hata detaylarını logla
+        if (error.response) {
+            console.error("FAL AI Virtual Try-On API hatası:", {
+                status: error.response.status,
+                data: error.response.data,
+                headers: error.response.headers
+            });
+        } else if (error.request) {
+            console.error("FAL AI Virtual Try-On network hatası:", error.request);
+        } else {
+            console.error("FAL AI Virtual Try-On genel hatası:", error.message);
+        }
+        
+        throw new functions.https.HttpsError("internal", "Sanal deneme sırasında bir hata oluştu. Lütfen tekrar deneyin.");
     }
 });
 
-// --- 3. KULLANICI FONKSİYONU: KOMBİN ÖNERİSİ ---
+// --- 3. KULLANICI FONKSİYONU: KOMBİN ÖNERİSİ (GÜNCELLENDİ) ---
 /**
  * Kullanıcının gardırobuna ve metin isteğine göre kombin önerir.
  * Kullanıcının 'remainingSuggestions' kotasını kontrol eder ve düşürür.
  */
 exports.getOutfitSuggestion = functions
     .https.onCall({secrets: [falKey]}, async (payload, context) => {
+      
       const data = payload.data || payload;
       const { adapty_user_id, user_request, clothing_items } = data;
 
@@ -251,7 +278,14 @@ exports.getOutfitSuggestion = functions
         throw new functions.https.HttpsError("invalid-argument", "Gerekli parametreler eksik (adapty_user_id, user_request, clothing_items).");
       }
 
+      // Minimum kıyafet sayısı kontrolü
+      if (clothing_items.length < 10) {
+        throw new functions.https.HttpsError("invalid-argument", "Kombin önerisi için gardırobunuzda en az 10 kıyafet bulunmalıdır. Şu anda " + clothing_items.length + " kıyafetiniz var.");
+      }
+
       try {
+        console.log(`Outfit suggestion başlatılıyor - User: ${adapty_user_id}, Items: ${clothing_items.length}`);
+        
         // Kullanıcının öneri hakkı olup olmadığını kontrol et ve kotayı düşür
         await checkOrUpdateQuota(adapty_user_id, "remainingSuggestions");
 
@@ -267,6 +301,12 @@ ${clothingJsonArray}
 **YOUR TASK:**
 Analyze the user's request and the detailed descriptions of all available clothes. Select the best items to form a coherent and stylish outfit that matches the user's needs (like weather, occasion, or color theme).
 
+**IMPORTANT RULES:**
+- Only use items from the provided wardrobe list
+- Each recommended item ID must exist in the provided clothing_items array
+- If the wardrobe doesn't have suitable items for the request, suggest the best available alternatives
+- Always provide at least 2 items for a complete outfit
+
 **OUTPUT FORMAT:**
 Your response MUST be a single, valid JSON object. Do not add any text, explanations, or markdown formatting before or after the JSON object. The JSON object must contain exactly two keys: "recommendation" and "description".
 
@@ -279,12 +319,14 @@ Your response MUST be a single, valid JSON object. Do not add any text, explanat
   "description": "I've created a stylish and functional outfit for a cool, rainy day. The water-resistant trench coat will keep you dry, while the wool sweater provides warmth. The dark pants are suitable for an office environment and are less likely to show splashes."
 }`;
 
+        console.log("FAL AI Outfit Suggestion API'sine istek gönderiliyor...");
+        
         const apiKey = falKey.value();
         
         const response = await axios.post(
             "https://fal.run/fal-ai/any-llm/enterprise",
             { 
-              model: "google/gemini-flash", // Stabil model adıyla güncellendi
+              model: "google/gemini-2.5-flash",
               prompt: finalPrompt,
               max_tokens: 1024,
               temperature: 0.7,
@@ -297,6 +339,8 @@ Your response MUST be a single, valid JSON object. Do not add any text, explanat
             },
         );
 
+        console.log("FAL AI Outfit Suggestion response alındı:", response.status);
+
         const llmOutput = response.data?.output ?? "{}";
         try {
           const jsonMatch = llmOutput.match(/\{[\s\S]*\}/);
@@ -304,19 +348,86 @@ Your response MUST be a single, valid JSON object. Do not add any text, explanat
             throw new Error("Cevapta geçerli bir JSON objesi bulunamadı.");
           }
           const parsedJson = JSON.parse(jsonMatch[0]);
+          
+          // Response validation
           if (!parsedJson.recommendation || !parsedJson.description) {
             throw new Error("Response eksik alanlar içeriyor: 'recommendation' veya 'description' bulunamadı.");
           }
+          
+          if (!Array.isArray(parsedJson.recommendation) || parsedJson.recommendation.length === 0) {
+            throw new Error("Recommendation array boş veya geçersiz.");
+          }
+
+          console.log(`Outfit suggestion başarıyla tamamlandı - User: ${adapty_user_id}, Recommended items: ${parsedJson.recommendation.length}`);
           return parsedJson;
+          
         } catch (e) {
           console.error("LLM JSON parse hatası:", llmOutput, e);
           throw new functions.https.HttpsError("internal", "Stil danışmanının cevabı anlaşılamadı. Lütfen tekrar deneyin.");
         }
       } catch (error) {
+        // Quota hatalarını doğrudan geçir
         if (error.code === "resource-exhausted") {
+            console.log(`Quota exhausted for user ${adapty_user_id} - Outfit Suggestion`);
             throw error;
         }
-        console.error("FAL AI Any-LLM hatası (getOutfitSuggestion):", error.response ? error.response.data : error.message);
-        throw new functions.https.HttpsError("internal", "Kombin önerisi alınırken bir hata oluştu.");
+        
+        // API hata detaylarını logla
+        if (error.response) {
+            console.error("FAL AI Outfit Suggestion API hatası:", {
+                status: error.response.status,
+                data: error.response.data
+            });
+        } else {
+            console.error("FAL AI Outfit Suggestion genel hatası:", error.message);
+        }
+        
+        throw new functions.https.HttpsError("internal", "Kombin önerisi alınırken bir hata oluştu. Lütfen tekrar deneyin.");
+      }
+    });
+
+// --- 4. KULLANICI FONKSİYONU: KULLANICI TİER BİLGİSİ ---
+/**
+ * Kullanıcının mevcut tier bilgilerini ve kalan kotalarını döndürür.
+ * SwiftUI uygulamasının paywall durumunu kontrol etmesi için kullanılır.
+ */
+exports.getUserTier = functions
+    .https.onCall(async (payload, context) => {
+      
+      const data = payload.data || payload;
+      const { adapty_user_id } = data;
+
+      if (!adapty_user_id) {
+        throw new functions.https.HttpsError("invalid-argument", "Gerekli parametreler eksik (adapty_user_id).");
+      }
+
+      try {
+        console.log(`User tier bilgisi isteniyor - User: ${adapty_user_id}`);
+        
+        const userRef = db.collection("users").doc(adapty_user_id);
+        const userDoc = await userRef.get();
+        
+        if (!userDoc.exists) {
+          console.log(`User ${adapty_user_id} bulunamadı`);
+          throw new functions.https.HttpsError("not-found", "Kullanıcı bulunamadı. Lütfen önce bir işlem yaparak hesabınızı oluşturun.");
+        }
+        
+        const userData = userDoc.data();
+
+        // Kullanıcı bilgilerini temizle ve döndür
+        const userTierInfo = {
+          tier: userData.tier || "freemium",
+          remainingTryOns: userData.remainingTryOns || 0,
+          remainingSuggestions: userData.remainingSuggestions || 0,
+          remainingClothAnalysis: userData.remainingClothAnalysis || 0,
+          createdAt: userData.createdAt
+        };
+
+        console.log(`User tier bilgisi döndürülüyor - User: ${adapty_user_id}, Tier: ${userTierInfo.tier}`);
+        return userTierInfo;
+
+      } catch (error) {
+        console.error(`getUserTier hatası - User: ${adapty_user_id}:`, error);
+        throw new functions.https.HttpsError("internal", "Kullanıcı bilgileri alınırken bir hata oluştu.");
       }
     });
