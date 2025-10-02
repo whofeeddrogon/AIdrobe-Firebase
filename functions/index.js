@@ -23,48 +23,89 @@ const db = admin.firestore();
 
 /**
  * Adapty API'sinden kullanıcı profilini çeker ve doğrular.
- * @param {string} userId Kullanıcının benzersiz adapty_user_id'si.
+ * @param {string} userId Kullanıcının ID'si (profile_id veya customer_user_id).
  * @return {object|null} Adapty'deki kullanıcı profili veya null (bulunamazsa).
  */
 async function getAdaptyProfile(userId) {
+  const apiKey = adaptySecretKey.value();
+  
+  console.log(`Fetching Adapty profile for user: ${userId}`);
+  console.log(`Using adapty-profile-id header...`);
+  
   try {
-    const apiKey = adaptySecretKey.value();
     const response = await axios.get(
-      `https://api.adapty.io/api/v1/sdk/analytics/profiles/${userId}/`,
+      `https://api.adapty.io/api/v2/server-side-api/profile/`,
       {
         headers: {
           "Authorization": `Api-Key ${apiKey}`,
+          "adapty-profile-id": userId,
           "Content-Type": "application/json",
         },
+        timeout: 10000
       }
     );
-    return response.data?.data?.attributes || null;
+    
+    console.log(`✅ Profile found!`, {
+      profileId: response.data?.data?.profile_id,
+      customerUserId: response.data?.data?.customer_user_id,
+      hasAccessLevels: !!response.data?.data?.access_levels?.length,
+      hasSubscriptions: !!response.data?.data?.subscriptions?.length
+    });
+    
+    return response.data?.data || null;
+    
   } catch (error) {
     if (error.response?.status === 404) {
-      console.log(`User ${userId} not found in Adapty`);
+      console.log(`❌ User ${userId} not found in Adapty (404)`);
       return null;
     }
-    console.error(`Adapty API error for user ${userId}:`, error.response?.data || error.message);
+    
+    console.error(`Adapty API error for user ${userId}:`, {
+      status: error.response?.status,
+      errorCode: error.response?.data?.error_code,
+      errors: error.response?.data?.errors,
+      message: error.message
+    });
+    
+    if (error.response?.status === 401 || error.response?.status === 403) {
+      console.error("❌ Adapty API Key authorization failed!");
+    }
+    
     throw error;
   }
 }
 
 /**
  * Adapty abonelik durumuna göre kota değerlerini hesaplar.
- * @param {object} adaptyProfile Adapty'den gelen kullanıcı profili.
+ * @param {object} adaptyProfile Adapty'den gelen kullanıcı profili (data objesi).
  * @return {object} Kullanıcının tier'ına göre kota değerleri.
  */
 function calculateQuotaFromAdapty(adaptyProfile) {
-  // Aktif abonelik kontrolü
-  const subscriptions = adaptyProfile?.subscriptions || {};
+  // Access levels kontrolü (premium access'i gösterir)
+  const accessLevels = adaptyProfile?.access_levels || [];
+  const subscriptions = adaptyProfile?.subscriptions || [];
   
-  // Aktif abonelikleri bul
-  const activeSubscriptions = Object.entries(subscriptions).filter(([key, sub]) => 
-    sub.is_active && !sub.is_in_grace_period && !sub.is_refund
+  console.log(`Calculating quota for profile - Access Levels: ${accessLevels.length}, Subscriptions: ${subscriptions.length}`);
+  
+  // Aktif access level var mı kontrol et
+  const hasActiveAccess = accessLevels.some(access => 
+    access.is_active === true || 
+    (access.expires_at === null || new Date(access.expires_at) > new Date())
   );
+  
+  // Aktif subscription var mı kontrol et
+  const activeSubscriptions = subscriptions.filter(sub => {
+    const isActive = sub.is_active !== false;
+    const notInGracePeriod = !sub.is_in_grace_period;
+    const notRefunded = !sub.is_refund;
+    const notExpired = !sub.expires_at || new Date(sub.expires_at) > new Date();
+    
+    return isActive && notInGracePeriod && notRefunded && notExpired;
+  });
 
-  if (activeSubscriptions.length === 0) {
-    // Freemium kullanıcı - aktif abonelik yok
+  if (!hasActiveAccess && activeSubscriptions.length === 0) {
+    // Freemium kullanıcı - aktif abonelik/access yok
+    console.log("User has no active subscriptions - freemium tier");
     return {
       tier: "freemium",
       remainingTryOns: 10,
@@ -73,20 +114,21 @@ function calculateQuotaFromAdapty(adaptyProfile) {
     };
   }
 
-  // Abonelik seviyesini product_id'den belirle
-  // Adapty'deki product_id'nize göre bu isimleri ayarlayın
-  let tier = "premium"; // varsayılan
+  // Premium kullanıcı - varsayılan
+  let tier = "premium";
   let quotas = {
     remainingTryOns: 100,
     remainingSuggestions: 100,
     remainingClothAnalysis: 100,
   };
 
-  // Ultra premium kontrolü (product_id'ye göre)
-  for (const [key, sub] of activeSubscriptions) {
-    const productId = sub.vendor_product_id?.toLowerCase() || "";
+  // Product ID'ye göre tier belirleme
+  for (const sub of activeSubscriptions) {
+    const productId = sub.store_product_id?.toLowerCase() || "";
     
-    // Ultra premium product ID'leri (bunları kendi product ID'lerinize göre ayarlayın)
+    console.log(`Checking subscription product: ${productId}`);
+    
+    // Ultra premium product ID'leri kontrol et
     if (productId.includes("ultra") || productId.includes("unlimited") || productId.includes("pro")) {
       tier = "ultra_premium";
       quotas = {
@@ -94,10 +136,12 @@ function calculateQuotaFromAdapty(adaptyProfile) {
         remainingSuggestions: 500,
         remainingClothAnalysis: 500,
       };
-      break; // Ultra bulundu, daha fazla kontrol gereksiz
+      console.log(`Ultra premium tier detected from product: ${productId}`);
+      break;
     }
   }
 
+  console.log(`Final tier: ${tier}`);
   return {
     tier,
     ...quotas,
@@ -624,10 +668,13 @@ exports.syncUserWithAdapty = functions
 exports.adaptyWebhook = functions
     .https.onRequest({secrets: [adaptySecretKey]}, async (req, res) => {
       
+      // Content-Type header'ını ayarla
+      res.set('Content-Type', 'application/json');
+      
       // Sadece POST isteklerini kabul et
       if (req.method !== 'POST') {
         console.warn('Webhook: Invalid method:', req.method);
-        res.status(405).send('Method Not Allowed');
+        res.status(405).json({ error: 'Method Not Allowed' });
         return;
       }
 
@@ -642,16 +689,14 @@ exports.adaptyWebhook = functions
 
         // İlgilendiğimiz event'ler
         const relevantEvents = [
-          'subscription_initial_purchase',
+          'subscription_started',
           'subscription_renewed',
-          'subscription_refunded',
           'subscription_expired',
-          'subscription_cancelled',
         ];
 
         if (!relevantEvents.includes(eventType)) {
           console.log(`Ignoring event type: ${eventType}`);
-          res.status(200).send('OK');
+          res.status(200).json({ status: 'ignored', event_type: eventType });
           return;
         }
 
@@ -660,7 +705,7 @@ exports.adaptyWebhook = functions
         
         if (!adaptyProfile) {
           console.error(`Profile ${profileId} not found in Adapty`);
-          res.status(200).send('OK'); // Adapty'ye 200 dön ama işleme
+          res.status(200).json({ status: 'profile_not_found', profile_id: profileId });
           return;
         }
 
@@ -695,6 +740,6 @@ exports.adaptyWebhook = functions
       } catch (error) {
         console.error('Webhook error:', error);
         // Webhook hatalarında da 200 dön ki Adapty retry yapmasın
-        res.status(200).send('OK');
+        res.status(200).json({ status: 'error', message: error.message });
       }
     });
