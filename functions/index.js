@@ -267,7 +267,7 @@ exports.analyzeClothingImage = functions
           1.  For the "category" value, you MUST choose the most appropriate category ONLY from this list: [${categoryList}].
           2.  For the "description" value, provide a single, comprehensive paragraph in English. This paragraph must describe the item's physical details (material, fit, color, patterns) AND its context (formality level, suitable occasions, and appropriate weather conditions).
           3.  CRITICAL RULE: Your description must ONLY be about the garment. DO NOT mention the background, the surface it is on, or how it is positioned (e.g., "laid flat", "on a hanger"). Focus strictly on the item's own features.
-          4.  IMPORTANT: If there is any text or writing on the clothing item, you MUST use escape characters for quotes. For example, if the text contains quotes like "RIDE ME NUTS", write it as \\"RIDE ME NUTS\\" in the JSON string to ensure valid JSON format.
+          4.  IMPORTANT: When describing text printed on the clothing, DO NOT use quotation marks (""). Instead, write the text directly without quotes. For example, if a shirt says "JUST DO IT", write: The shirt displays the text JUST DO IT in bold letters. WRONG: "The t-shirt has the phrase "GOOD VIBES ONLY" printed", CORRECT: "The t-shirt has the phrase GOOD VIBES ONLY printed"
 
           Example JSON response:
           {
@@ -278,7 +278,7 @@ exports.analyzeClothingImage = functions
           Example with text on clothing:
           {
             "category": "T-Shirt",
-            "description": "A black cotton t-shirt with the text \\"RIDE ME NUTS\\" printed on the front in bold white letters. The shirt has a crew neck and short sleeves, suitable for casual wear in warm weather."
+            "description": "A black cotton t-shirt with the text RIDE ME NUTS printed on the front in bold white letters. The shirt has a crew neck and short sleeves, suitable for casual wear in warm weather."
           }
         `;
         
@@ -427,7 +427,7 @@ exports.getOutfitSuggestion = functions
     .https.onCall({secrets: [falKey, adaptySecretKey]}, async (payload, context) => {
       
       const data = payload.data || payload;
-      const { adapty_user_id, user_request, clothing_items } = data;
+      const { adapty_user_id, user_request, clothing_items, user_information } = data;
 
       if (!adapty_user_id || !user_request || !Array.isArray(clothing_items)) {
         throw new functions.https.HttpsError("invalid-argument", "Gerekli parametreler eksik (adapty_user_id, user_request, clothing_items).");
@@ -445,11 +445,27 @@ exports.getOutfitSuggestion = functions
         await checkOrUpdateQuota(adapty_user_id, "remainingSuggestions");
 
         const clothingJsonArray = JSON.stringify(clothing_items, null, 2);
+        
+        // Kullanıcı bilgilerini formatla
+        let userInfoSection = "";
+        if (user_information) {
+          const { gender, height, weight, age } = user_information;
+          const userDetails = [];
+          if (gender) userDetails.push(`Gender: ${gender}`);
+          if (age) userDetails.push(`Age: ${age}`);
+          if (height) userDetails.push(`Height: ${height} cm`);
+          if (weight) userDetails.push(`Weight: ${weight} kg`);
+          
+          if (userDetails.length > 0) {
+            userInfoSection = `\n**USER INFORMATION:**\n${userDetails.join(", ")}\n`;
+          }
+        }
+        
         const finalPrompt = `You are an expert fashion stylist. Your task is to create an outfit combination from a provided list of clothes based on a user's request.
 
 **USER REQUEST:**
 "${user_request}"
-
+${userInfoSection}
 **AVAILABLE CLOTHES (WARDROBE):**
 ${clothingJsonArray}
 
@@ -461,11 +477,21 @@ Analyze the user's request and the detailed descriptions of all available clothe
 - Each recommended item ID must exist in the provided clothing_items array
 - If the wardrobe doesn't have suitable items for the request, suggest the best available alternatives
 - Always provide at least 2 items for a complete outfit
+- **CRITICAL LAYERING ORDER**: Order the recommendation array from innermost to outermost layers (bottom to top, inside to outside). This is essential for virtual try-on technology. Follow this sequence:
+  1. Base layers (underwear if visible)
+  2. Bottom wear (pants, jeans, shorts, skirts)
+  3. Top wear base layer (t-shirts, shirts, blouses)
+  4. Mid layers (sweaters, vests)
+  5. Outer layers (jackets, coats, blazers)
+  6. Footwear (shoes, boots, sneakers)
+  7. Accessories (hats, scarves, bags, jewelry, sunglasses)
+  Example correct order: ["pants_ID", "shirt_ID", "jacket_ID", "shoes_ID", "hat_ID"]
+  Example WRONG order: ["jacket_ID", "shirt_ID", "pants_ID"] ❌
 
 **OUTPUT FORMAT:**
 Your response MUST be a single, valid JSON object. Do not add any text, explanations, or markdown formatting before or after the JSON object. The JSON object must contain exactly two keys: "recommendation" and "description".
 
-1.  \`recommendation\`: An array of strings. Each string MUST be the ID of a selected clothing item from the provided wardrobe list.
+1.  \`recommendation\`: An array of strings ordered by layering sequence (innermost first, outermost last). Each string MUST be the ID of a selected clothing item from the provided wardrobe list.
 2.  \`description\`: A helpful and stylish explanation **in English** detailing why you chose this combination. It should justify your choices based on the user's request and how the items complement each other.
 
 **EXAMPLE RESPONSE:**
@@ -547,7 +573,7 @@ Your response MUST be a single, valid JSON object. Do not add any text, explanat
  * SwiftUI uygulamasının paywall durumunu kontrol etmesi için kullanılır.
  */
 exports.getUserTier = functions
-    .https.onCall(async (payload, context) => {
+    .https.onCall({secrets: [adaptySecretKey]}, async (payload, context) => {
       
       const data = payload.data || payload;
       const { adapty_user_id } = data;
@@ -562,12 +588,14 @@ exports.getUserTier = functions
         const userRef = db.collection("users").doc(adapty_user_id);
         const userDoc = await userRef.get();
         
-        if (!userDoc.exists) {
-          console.log(`User ${adapty_user_id} bulunamadı`);
-          throw new functions.https.HttpsError("not-found", "Kullanıcı bulunamadı. Lütfen önce bir işlem yaparak hesabınızı oluşturun.");
-        }
+        let userData;
         
-        const userData = userDoc.data();
+        if (!userDoc.exists) {
+          console.log(`User ${adapty_user_id} bulunamadı, yeni kullanıcı oluşturuluyor...`);
+          userData = await createNewUser(adapty_user_id);
+        } else {
+          userData = userDoc.data();
+        }
 
         // Kullanıcı bilgilerini temizle ve döndür
         const userTierInfo = {
