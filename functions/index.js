@@ -476,7 +476,14 @@ Analyze the user's request and the detailed descriptions of all available clothe
 - Only use items from the provided wardrobe list
 - Each recommended item ID must exist in the provided clothing_items array
 - If the wardrobe doesn't have suitable items for the request, suggest the best available alternatives
-- Always provide at least 2 items for a complete outfit
+- **OUTFIT COMPLETENESS RULE**: Every outfit MUST include:
+  * EITHER: At least 1 bottom wear (pants/jeans/shorts/skirt) AND at least 1 top wear (t-shirt/shirt/blouse/sweater)
+  * OR: 1 full-body garment (dress/jumpsuit) that covers both top and bottom
+  * You CANNOT recommend only bottoms, only tops, or only accessories - the outfit must be wearable!
+  * Example valid: ["jeans_ID", "shirt_ID"]
+  * Example valid: ["dress_ID", "jacket_ID"]
+  * Example INVALID: ["skirt_ID", "pants_ID"] (only bottoms, no top)
+  * Example INVALID: ["hat_ID", "bag_ID"] (only accessories)
 - **CRITICAL LAYERING ORDER**: Order the recommendation array from innermost to outermost layers (bottom to top, inside to outside). This is essential for virtual try-on technology. Follow this sequence:
   1. Base layers (underwear if visible)
   2. Bottom wear (pants, jeans, shorts, skirts)
@@ -486,7 +493,7 @@ Analyze the user's request and the detailed descriptions of all available clothe
   6. Footwear (shoes, boots, sneakers)
   7. Accessories (hats, scarves, bags, jewelry, sunglasses)
   Example correct order: ["pants_ID", "shirt_ID", "jacket_ID", "shoes_ID", "hat_ID"]
-  Example WRONG order: ["jacket_ID", "shirt_ID", "pants_ID"] ❌
+  Example WRONG order: ["jacket_ID", "shirt_ID", "pants_ID"]
 
 **OUTPUT FORMAT:**
 Your response MUST be a single, valid JSON object. Do not add any text, explanations, or markdown formatting before or after the JSON object. The JSON object must contain exactly two keys: "recommendation" and "description".
