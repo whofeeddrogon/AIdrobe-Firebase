@@ -320,7 +320,21 @@ exports.analyzeClothingImage = functions
             if (!jsonMatch) {
               throw new Error("Cevapta geçerli bir JSON objesi bulunamadı.");
             }
-            const parsedJson = JSON.parse(jsonMatch[0]);
+            
+            let jsonString = jsonMatch[0];
+            
+            // JSON içindeki description field'ındaki iç içe quote'ları temizle
+            // "description": "text with "inner quotes" more text" -> "description": "text with inner quotes more text"
+            jsonString = jsonString.replace(
+              /"description"\s*:\s*"([^"]*(?:"[^"]*"[^"]*)*)"/g,
+              (match, content) => {
+                // Description içindeki tüm iç quote'ları kaldır
+                const cleanContent = content.replace(/\\"/g, '').replace(/"/g, '');
+                return `"description": "${cleanContent}"`;
+              }
+            );
+            
+            const parsedJson = JSON.parse(jsonString);
             return { ...parsedJson, ...{"image_url": bgRemovedImageUrl}};
         } catch (e) {
             console.error("LLM JSON parse hatası:", llmOutput, e);
