@@ -108,9 +108,9 @@ function calculateQuotaFromAdapty(adaptyProfile) {
     console.log("User has no active subscriptions - freemium tier");
     return {
       tier: "freemium",
-      remainingTryOns: 10,
-      remainingSuggestions: 0,
-      remainingClothAnalysis: 10,
+      remainingTryOns: 20,
+      remainingSuggestions: 20,
+      remainingClothAnalysis: 20,
     };
   }
 
